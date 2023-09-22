@@ -8,6 +8,38 @@ from scvi.utils._exceptions import InvalidParameterError
 from torch import nn
 
 
+class ConditionalBatchNorm2d(nn.Module):
+    def __init__(self, num_features, num_classes, momentum, eps):
+        super().__init__()
+        self.num_features = num_features
+        self.bn = nn.BatchNorm1d(self.num_features, momentum=momentum, eps=eps, affine=False)
+        self.embed = nn.Embedding(num_classes, self.num_features * 2)
+        self.embed.weight.data[:, :self.num_features].normal_(1, 0.02)  # Initialise scale at N(1, 0.02)
+        self.embed.weight.data[:, self.num_features:].zero_()  # Initialise bias at 0
+
+    def forward(self, x, y):
+        out = self.bn(x)
+        gamma, beta = self.embed(y.long().ravel()).chunk(2, 1)
+        out = gamma.view(-1, self.num_features) * out + beta.view(-1, self.num_features)
+
+        return out
+
+class ConditionalLayerNorm(nn.Module):
+    def __init__(self, num_features, num_classes):
+        super().__init__()
+        self.num_features = num_features
+        self.ln = nn.LayerNorm(self.num_features, elementwise_affine=False)
+        self.embed = nn.Embedding(num_classes, self.num_features * 2)
+        self.embed.weight.data[:, :self.num_features].normal_(1, 0.02)  # Initialise scale at N(1, 0.02)
+        self.embed.weight.data[:, self.num_features:].zero_()  # Initialise bias at 0
+
+    def forward(self, x, y):
+        out = self.ln(x)
+        gamma, beta = self.embed(y.long().ravel()).chunk(2, 1)
+        out = gamma.view(-1, self.num_features) * out + beta.view(-1, self.num_features)
+
+        return out
+
 class MLPBlock(nn.Module):
     """Multi-layer perceptron block.
 
@@ -45,7 +77,9 @@ class MLPBlock(nn.Module):
         self,
         n_in: int,
         n_out: int,
+        cat_dim: int | None = None,
         bias: bool = True,
+        conditional: bool = False,
         norm: Literal["batch", "layer"] | None = None,
         norm_kwargs: dict | None = None,
         activation: Literal["relu", "leaky_relu", "softmax", "softplus"] | None = None,
@@ -62,16 +96,28 @@ class MLPBlock(nn.Module):
         self.dropout = nn.Identity()
         self.residual = residual
 
-        if norm == "batch":
-            self.norm = nn.BatchNorm1d(n_out, **self.norm_kwargs)
-        elif norm == "layer":
-            self.norm = nn.LayerNorm(n_out, **self.norm_kwargs)
-        elif norm is not None:
-            raise InvalidParameterError(
-                param="norm",
-                value=norm,
-                valid=["batch", "layer", None],
-            )
+        if conditional:
+            if norm == "batch":
+                self.norm = ConditionalBatchNorm2d(n_out, cat_dim, momentum=0.01, eps=0.001)
+            elif norm == "layer":
+                self.norm = ConditionalLayerNorm(n_out, cat_dim)
+            elif norm is not None:
+                raise InvalidParameterError(
+                    param="norm",
+                    value=norm,
+                    valid=["batch", "layer", None],
+                )
+        else:
+            if norm == "batch":
+                self.norm = nn.BatchNorm1d(n_out, **self.norm_kwargs)
+            elif norm == "layer":
+                self.norm = nn.LayerNorm(n_out, **self.norm_kwargs)
+            elif norm is not None:
+                raise InvalidParameterError(
+                    param="norm",
+                    value=norm,
+                    valid=["batch", "layer", None],
+                )
 
         if activation == "relu":
             self.activation = nn.ReLU(**self.activation_kwargs)
