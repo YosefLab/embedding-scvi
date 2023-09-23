@@ -79,7 +79,6 @@ class EmbeddingVAE(BaseModuleClass):
                 embedding_dim=self.n_latent,
             )
 
-
         encoder_dist_params = likelihood_to_dist_params("normal")
         _encoder_kwargs = {
             "n_hidden": 256,
@@ -89,7 +88,7 @@ class EmbeddingVAE(BaseModuleClass):
             "activation": "gelu",
             "dropout_rate": 0.1,
             "residual": True,
-            "cat_dim": self.categorical_covariates.num_embeddings,
+            "cat_dim": self.covariates_encoder.num_embeddings,
         }
         _encoder_kwargs.update(self.encoder_kwargs)
         self.encoder = MultiOutputMLP(
@@ -109,7 +108,7 @@ class EmbeddingVAE(BaseModuleClass):
             "activation": "gelu",
             "dropout_rate": None,
             "residual": True,
-            "n_out_params": self.categorical_covariates.num_embeddings,
+            "cat_dim": self.covariates_encoder.num_embeddings
         }
 
         _decoder_kwargs.update(self.decoder_kwargs)
@@ -140,7 +139,7 @@ class EmbeddingVAE(BaseModuleClass):
         covariates = tensors.get(REGISTRY_KEYS.CAT_COVS_KEY, None)
         return {
             REGISTRY_KEYS.X_KEY: x,
-            REGISTRY_KEYS.LABELS_KEY: y,
+            "y": y,
             REGISTRY_KEYS.CAT_COVS_KEY: covariates,
         }
 
@@ -152,8 +151,8 @@ class EmbeddingVAE(BaseModuleClass):
         extra_categorical_covs: torch.Tensor | None = None,
         subset_categorical_covs: int | list[int] | None = None,
     ):
-        X = torch.log1p(X)
         library_size = torch.log(X.sum(dim=1, keepdim=True))
+        X = torch.log1p(X)
 
         posterior_loc, posterior_scale = self.encoder(X)
         posterior = dist.Normal(posterior_loc, posterior_scale + 1e-9)
@@ -165,7 +164,7 @@ class EmbeddingVAE(BaseModuleClass):
                 torch.exp(self.u_prior_scales))
             prior = dist.MixtureSameFamily(cats, normal_dists)
         elif self.prior=='mog_celltype':
-            label_bias = 10.0 * torch.nn.functional.one_hot(y, self.n_labels) if self.n_labels >= 2 else 0.0
+            label_bias = 10.0 * torch.nn.functional.one_hot(labels, self.n_labels) if self.n_labels >= 2 else 0.0
             cats = dist.Categorical(logits=self.u_prior_logits + label_bias)
             normal_dists = dist.Normal(
                 self.u_prior_means,
