@@ -13,13 +13,15 @@ class ConditionalBatchNorm2d(nn.Module):
         super().__init__()
         self.num_features = num_features
         self.bn = nn.BatchNorm1d(self.num_features, momentum=momentum, eps=eps, affine=False)
-        self.embed = nn.Embedding(num_classes, self.num_features * 2)
-        self.embed.weight.data[:, :self.num_features].normal_(1, 0.02)  # Initialise scale at N(1, 0.02)
-        self.embed.weight.data[:, self.num_features:].zero_()  # Initialise bias at 0
+        self.embed_scale = nn.Embedding(num_classes, self.num_features)
+        self.embed_bias = nn.Embedding(num_classes, self.num_features)
+        self.embed_scale.weight.data.normal_(1, 0.02)  # Initialise scale at N(1, 0.02)
+        self.embed_bias.weight.data.zero_()  # Initialise bias at 0
 
     def forward(self, x, y):
         out = self.bn(x)
-        gamma, beta = self.embed(y.long().ravel()).chunk(2, 1)
+        gamma = self.embed_scale(y.long().ravel())
+        beta = self.embed_bias(y.long().ravel())
         out = gamma.view(-1, self.num_features) * out + beta.view(-1, self.num_features)
 
         return out
@@ -30,12 +32,15 @@ class ConditionalLayerNorm(nn.Module):
         self.num_features = num_features
         self.ln = nn.LayerNorm(self.num_features, elementwise_affine=False)
         self.embed = nn.Embedding(num_classes, self.num_features * 2)
-        self.embed.weight.data[:, :self.num_features].normal_(1, 0.02)  # Initialise scale at N(1, 0.02)
+        self.embed_scale = nn.Embedding(num_classes, self.num_features)
+        self.embed_bias = nn.Embedding(num_classes, self.num_features)
+        self.embed_scale.weight.data.normal_(1, 0.02)  # Initialise scale at N(1, 0.02)
         self.embed.weight.data[:, self.num_features:].zero_()  # Initialise bias at 0
 
     def forward(self, x, y):
         out = self.ln(x)
-        gamma, beta = self.embed(y.long().ravel()).chunk(2, 1)
+        gamma = self.embed_scale(y.long().ravel())
+        beta = self.embed_bias(y.long().ravel())
         out = gamma.view(-1, self.num_features) * out + beta.view(-1, self.num_features)
 
         return out
