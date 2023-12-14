@@ -39,10 +39,13 @@ class EmbeddingVAE(BaseModuleClass):
         self,
         n_vars: int,
         n_latent: int = 25,
+        n_labels: int | None = None,
         categorical_covariates: list[int] | None = None,
         likelihood: str = "zinb",
         encoder_kwargs: dict | None = None,
         decoder_kwargs: dict | None = None,
+        prior: str | None = None,
+        mixture_components: int = 50,
     ):
         super().__init__()
 
@@ -53,6 +56,29 @@ class EmbeddingVAE(BaseModuleClass):
         self.encoder_kwargs = encoder_kwargs or {}
         self.decoder_kwargs = decoder_kwargs or {}
 
+        self.prior = prior
+        if self.prior=='mog':
+            self.register_buffer(
+                "u_prior_logits", torch.ones([mixture_components]))
+            self.register_buffer(
+                "u_prior_means", torch.randn([n_latent, mixture_components]))
+            self.register_buffer(
+                "u_prior_scales", torch.zeros([n_latent, mixture_components]))
+        elif self.prior=='mog_celltype':
+            self.register_buffer(
+                "u_prior_logits", torch.ones([n_labels]))
+            self.register_buffer(
+                "u_prior_means", torch.randn([n_latent, n_labels]))
+            self.register_buffer(
+                "u_prior_scales", torch.zeros([n_latent, n_labels]))
+
+        self.covariates_encoder = nn.Identity()
+        if self.categorical_covariates is not None:
+            self.covariates_encoder = ExtendableEmbeddingList(
+                num_embeddings=self.categorical_covariates,
+                embedding_dim=self.n_latent,
+            )
+
         encoder_dist_params = likelihood_to_dist_params("normal")
         _encoder_kwargs = {
             "n_hidden": 256,
@@ -62,6 +88,7 @@ class EmbeddingVAE(BaseModuleClass):
             "activation": "gelu",
             "dropout_rate": 0.1,
             "residual": True,
+            "cat_dim": self.covariates_encoder.num_embeddings,
         }
         _encoder_kwargs.update(self.encoder_kwargs)
         self.encoder = MultiOutputMLP(
@@ -81,7 +108,9 @@ class EmbeddingVAE(BaseModuleClass):
             "activation": "gelu",
             "dropout_rate": None,
             "residual": True,
+            "cat_dim": self.covariates_encoder.num_embeddings
         }
+
         _decoder_kwargs.update(self.decoder_kwargs)
         self.decoder = MultiOutputMLP(
             n_in=self.n_latent,
@@ -90,13 +119,6 @@ class EmbeddingVAE(BaseModuleClass):
             param_activations=list(decoder_dist_parmas.values()),
             **_decoder_kwargs,
         )
-
-        self.covariates_encoder = nn.Identity()
-        if self.categorical_covariates is not None:
-            self.covariates_encoder = ExtendableEmbeddingList(
-                num_embeddings=self.categorical_covariates,
-                embedding_dim=self.n_latent,
-            )
 
     def get_covariate_embeddings(
         self,
@@ -113,9 +135,11 @@ class EmbeddingVAE(BaseModuleClass):
 
     def _get_inference_input(self, tensors: dict[str, torch.Tensor]) -> dict:
         x = tensors[REGISTRY_KEYS.X_KEY]
+        y = tensors[REGISTRY_KEYS.LABELS_KEY]
         covariates = tensors.get(REGISTRY_KEYS.CAT_COVS_KEY, None)
         return {
             REGISTRY_KEYS.X_KEY: x,
+            "y": y,
             REGISTRY_KEYS.CAT_COVS_KEY: covariates,
         }
 
@@ -123,15 +147,32 @@ class EmbeddingVAE(BaseModuleClass):
     def inference(
         self,
         X: torch.Tensor,
+        y: torch.Tensor | None = None,
         extra_categorical_covs: torch.Tensor | None = None,
         subset_categorical_covs: int | list[int] | None = None,
     ):
-        X = torch.log1p(X)
         library_size = torch.log(X.sum(dim=1, keepdim=True))
+        X = torch.log1p(X)
 
         posterior_loc, posterior_scale = self.encoder(X)
         posterior = dist.Normal(posterior_loc, posterior_scale + 1e-9)
-        prior = dist.Normal(torch.zeros_like(posterior_loc), torch.ones_like(posterior_scale))
+
+        if self.prior=='mog':
+            cats = dist.Categorical(logits=self.u_prior_logits)
+            normal_dists = dist.Normal(
+                self.u_prior_means,
+                torch.exp(self.u_prior_scales))
+            prior = dist.MixtureSameFamily(cats, normal_dists)
+        elif self.prior=='mog_celltype':
+            label_bias = 10.0 * torch.nn.functional.one_hot(labels, self.n_labels) if self.n_labels >= 2 else 0.0
+            cats = dist.Categorical(logits=self.u_prior_logits + label_bias)
+            normal_dists = dist.Normal(
+                self.u_prior_means,
+                torch.exp(self.u_prior_scales))
+            prior = dist.MixtureSameFamily(cats, normal_dists)
+        else:
+            prior = dist.Normal(torch.zeros_like(posterior_loc), torch.ones_like(posterior_scale))
+
         z = posterior.rsample()
 
         covariates_z = self.covariates_encoder(
@@ -216,10 +257,18 @@ class EmbeddingVAE(BaseModuleClass):
         X = tensors[REGISTRY_KEYS.X_KEY]
         posterior = inference_outputs[TENSORS_KEYS.QZ_KEY]
         prior = inference_outputs[TENSORS_KEYS.PZ_KEY]
-        likelihood = generative_outputs[TENSORS_KEYS.PX_KEY]
 
-        # (n_obs, n_latent) -> (n_obs,)
-        kl_div = dist.kl_divergence(posterior, prior).sum(dim=-1)
+        if self.prior=='mog' or self.prior=='mog_celltype':
+            u = posterior.rsample(sample_shape=(10,))
+            # (n_obs, n_latent) -> (n_obs,)
+            kl_z = prior.log_prob(u) - posterior.log_prob(u)
+            kl_div = kl_z.sum(-1)
+        else:
+            # (n_obs, n_latent) -> (n_obs,)
+            kl_div = dist.kl_divergence(posterior, prior).sum(dim=-1)
+
+
+        likelihood = generative_outputs[TENSORS_KEYS.PX_KEY]
         weighted_kl_div = kl_weight * kl_div
         # (n_obs, n_vars) -> (n_obs,)
         reconstruction_loss = -likelihood.log_prob(X).sum(dim=-1)

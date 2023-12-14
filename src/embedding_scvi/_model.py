@@ -38,6 +38,7 @@ class EmbeddingSCVI(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         )
         self.module = EmbeddingVAE(
             n_vars=self.summary_stats.n_vars,
+            n_labels=self.summary_stats.n_labels,
             categorical_covariates=categorical_covariates,
             **kwargs,
         )
@@ -63,6 +64,7 @@ class EmbeddingSCVI(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         cls,
         adata: AnnData,
         layer: str | None = None,
+        labels_key: str | None = None,
         categorical_covariate_keys: list[str] | None = None,
         **kwargs,
     ):
@@ -77,6 +79,7 @@ class EmbeddingSCVI(VAEMixin, UnsupervisedTrainingMixin, BaseModelClass):
         setup_method_args = cls._get_setup_method_args(**locals())
         anndata_fields = [
             fields.LayerField(REGISTRY_KEYS.X_KEY, layer, is_count_data=True),
+            fields.CategoricalObsField(REGISTRY_KEYS.LABELS_KEY, labels_key),
             ExtendableCategoricalJointObsField(REGISTRY_KEYS.CAT_COVS_KEY, categorical_covariate_keys),
         ]
         adata_manager = AnnDataManager(fields=anndata_fields, setup_method_args=setup_method_args)
